@@ -36,11 +36,12 @@ const InstructionOption = enum {
     iproc,
     istruct,
     ifork,
+    isys,
 };
 
 const Instruction = struct {
     instruction: InstructionOption,
-    values: [8]this_module.Value,
+    values: [3]this_module.Value,
 };
 
 const ValueOption = enum {
@@ -53,7 +54,7 @@ const ValueOption = enum {
 const Value = union(ValueOption) {
     size: usize,
     float: f128,
-    string: []u8,
+    string: []const u8,
     registerident: RegisterIdent,
 };
 
@@ -88,6 +89,7 @@ pub const VMError = error{
     register_collision,
 };
 
+const vm_stdin_max_alloc_size: usize = 1_024_000;
 const vm_alloc_size: usize = 64;
 pub const VM = struct {
     stdout: std.io.AnyWriter,
@@ -100,9 +102,19 @@ pub const VM = struct {
     registers: [16]Register,
     stack: std.AutoHashMap(RegisterIdent, Register),
     instruction_vector: []Instruction,
+    instruction_vector_size: usize,
     program_counter: usize,
 
-    inline fn istr(self: *VM, register: RegisterIdent, value: Value) !void {
+    // testing function here.
+    fn getValueFromRegister(self: *VM, register: RegisterIdent) Value {
+        return self.registers[@intFromEnum(register)].value;
+    }
+
+    inline fn izero(self: *VM, register: RegisterIdent) void {
+        self.registers[@intFromEnum(register)].value.size = 0;
+    }
+
+    inline fn istr(self: *VM, register: RegisterIdent, value: Value) void {
         self.registers[@intFromEnum(register)].value = value;
     }
 
@@ -135,47 +147,62 @@ pub const VM = struct {
     }
 
     inline fn igets(self: *VM, string: RegisterIdent) !void {
-        self.registers[@intFromEnum(string)].value.string = try self.stdin.readAllAlloc(self.allocator);
+        self.registers[@intFromEnum(string)].value.string = try self.stdin.readAllAlloc(self.allocator, vm_stdin_max_alloc_size);
+    }
+
+    inline fn ifork(self: *VM, pid_register: RegisterIdent) !void {
+        self.registers[@intFromEnum(pid_register)] = try std.os.fork();
     }
 
     /// instruction: the given instruction to append
     /// this **INLINE** function reallocs the instruction_vector each vm_alloc_size - 1
     pub inline fn appendInstruction(self: *VM, instruction: Instruction) !void {
-        if ((self.instruction_vector.len % vm_alloc_size) == (vm_alloc_size - 1)) {
-            self.instruction_vector = self.allocator.realloc(self.instruction_vector, self.instruction_vector.len);
+        if ((self.instruction_vector_size % vm_alloc_size) == (vm_alloc_size - 1)) {
+            self.instruction_vector = try self.allocator.realloc(self.instruction_vector, vm_alloc_size * @divTrunc(self.instruction_vector_size, vm_alloc_size));
         }
-        self.instruction_vector[self.instruction_vector.len] = instruction;
+        self.instruction_vector_size += 1;
+        self.instruction_vector[self.instruction_vector_size] = instruction;
     }
 
     pub inline fn compute(self: *VM) !void {
-        for (self.instruction_vector) |instruction| {
-            switch (instruction.instruction) {
+        for (0..self.instruction_vector_size) |is| {
+            switch (self.instruction_vector[is].instruction) {
                 .iputs => {
-                    self.iputs(instruction.values[0]);
+                    try self.iputs(self.instruction_vector[is].values[0].registerident);
                 },
-                .eputs => {
-                    self.ieputs(instruction.values[0]);
+                .ieputs => {
+                    try self.ieputs(self.instruction_vector[is].values[0].registerident);
                 },
                 .igets => {
-                    self.igets(instruction.values[0]);
+                    try self.igets(self.instruction_vector[is].values[0].registerident);
+                },
+                .istr => {
+                    self.istr(self.instruction_vector[is].values[0].registerident, self.instruction_vector[is].values[1]);
+                },
+                .izero => {
+                    self.izero(self.instruction_vector[is].values[0].registerident);
+                },
+                else => {
+                    std.debug.print("Unimplemented", .{});
                 },
             }
         }
     }
 
-    pub fn destroy(self: *VM) !void {
+    pub fn destroy(self: *VM) void {
         self.arena.deinit();
     }
 };
 
-pub fn vmCreate() !VM {
-    var ret: VM = .{};
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+pub fn vmCreate(comptime allocator: std.mem.Allocator) !VM {
+    var ret: VM = undefined;
+    var arena = std.heap.ArenaAllocator.init(allocator);
     ret.allocator = arena.allocator();
     ret.arena = arena;
-    ret.instructions_vector = ret.allocator.alloc(Instruction, vm_alloc_size);
+    ret.instruction_vector = try ret.allocator.alloc(Instruction, vm_alloc_size);
     ret.instruction_vector[0].instruction = .inoop;
     ret.program_counter = 0x0;
+    ret.instruction_vector_size = 0;
 
     ret.stdout = std.io.getStdOut().writer().any();
     ret.stderr = std.io.getStdErr().writer().any();
@@ -184,7 +211,31 @@ pub fn vmCreate() !VM {
     return ret;
 }
 
-test "vm" {
-    var v: VM = vmCreate();
-    v.appendInstruction(.{});
+test "vm_strget" {
+    var v: VM = try vmCreate(std.heap.page_allocator);
+    defer v.destroy();
+    try v.appendInstruction(.{ .instruction = .istr, .values = [_]Value{ .{ .registerident = .r1 }, .{ .string = "Hello World" }, undefined } });
+    switch (v.getValueFromRegister(.r1)) {
+        .string => {
+            try std.testing.expectEqualStrings("Hello World", v.getValueFromRegister(.r1).string);
+        },
+        else => {
+            std.debug.print("unsupported", .{});
+        },
+    }
+    try v.compute();
+}
+
+test "vm_strzero" {
+    var v: VM = try vmCreate(std.heap.page_allocator);
+    defer v.destroy();
+    try v.appendInstruction(.{ .instruction = .istr, .values = [_]Value{ .{ .registerident = .r1 }, .{ .size = 0xaaaa }, undefined } });
+    try v.appendInstruction(.{ .instruction = .izero, .values = [_]Value{ .{ .registerident = .r1 }, undefined, undefined } });
+    try v.compute();
+    switch (v.getValueFromRegister(.r1)) {
+        .size => {
+            try std.testing.expectEqual(0, v.getValueFromRegister(.r1).size);
+        },
+        else => {},
+    }
 }

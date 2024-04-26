@@ -3,6 +3,10 @@ const this_module = @This();
 
 const InstructionOption = enum {
     inoop,
+    iadd,
+    isub,
+    imul,
+    idiv,
     izero,
     ipush,
     ipop,
@@ -21,6 +25,7 @@ const InstructionOption = enum {
     igetc,
     igets,
     ijmp,
+    ijlbl,
     ijc,
     ijeq,
     ijne,
@@ -37,6 +42,7 @@ const InstructionOption = enum {
     istruct,
     ifork,
     isys,
+    ilbl,
 };
 
 const Instruction = struct {
@@ -100,13 +106,15 @@ pub const VM = struct {
     allocator: std.mem.Allocator,
 
     registers: [16]Register,
+    labels: std.StringHashMap(usize),
     stack: std.AutoHashMap(RegisterIdent, Register),
+
     instruction_vector: []Instruction,
     instruction_vector_size: usize,
     program_counter: usize,
 
     // testing function here.
-    fn getValueFromRegister(self: *VM, register: RegisterIdent) Value {
+    inline fn getValueFromRegister(self: *VM, register: RegisterIdent) Value {
         return self.registers[@intFromEnum(register)].value;
     }
 
@@ -154,6 +162,122 @@ pub const VM = struct {
         self.registers[@intFromEnum(pid_register)] = try std.os.fork();
     }
 
+    inline fn ilbl(self: *VM, name: Value) !void {
+        var lbl: []const u8 = undefined;
+        switch (name) {
+            .string => {
+                lbl = name.string;
+            },
+            .registerident => {
+                lbl = self.registers[@intFromEnum(name.registerident)].value.string;
+            },
+            else => {},
+        }
+        try self.labels.put(lbl, self.program_counter + 1);
+    }
+
+    inline fn ijlbl(self: *VM, name: Value) !void {
+        var lbl: []const u8 = undefined;
+        switch (name) {
+            .string => {
+                lbl = name.string;
+            },
+            .registerident => {
+                lbl = self.registers[@intFromEnum(name.registerident)].value.string;
+            },
+            else => {},
+        }
+
+        const jpos = self.labels.get(lbl) orelse return VMError.illegal_instruction;
+        self.program_counter = jpos;
+    }
+
+    inline fn ijmp(self: *VM, value: usize) void {
+        self.program_counter = value;
+    }
+
+    inline fn ijeq(self: *VM, to: usize, eq1: Value, eq2: Value) void {
+        var eq1_val: usize = undefined;
+        var eq2_val: usize = undefined;
+        switch (eq1) {
+            .size => {
+                eq1_val = eq1.size;
+            },
+            .registerident => {
+                eq1_val = self.registers[@intFromEnum(eq1.registerident)].value.size;
+            },
+            else => {},
+        }
+
+        switch (eq2) {
+            .size => {
+                eq2_val = eq2.size;
+            },
+            .registerident => {
+                eq2_val = self.registers[@intFromEnum(eq2.registerident)].value.size;
+            },
+            else => {},
+        }
+
+        if (eq1_val == eq2_val) {
+            self.program_counter = to;
+        }
+    }
+
+    inline fn ijne(self: *VM, to: usize, eq1: Value, eq2: Value) void {
+        var eq1_val: usize = undefined;
+        var eq2_val: usize = undefined;
+        switch (eq1) {
+            .size => {
+                eq1_val = eq1.size;
+            },
+            .registerident => {
+                eq1_val = self.registers[@intFromEnum(eq1.registerident)].value.size;
+            },
+            else => {},
+        }
+
+        switch (eq2) {
+            .size => {
+                eq2_val = eq2.size;
+            },
+            .registerident => {
+                eq2_val = self.registers[@intFromEnum(eq2.registerident)].value.size;
+            },
+            else => {},
+        }
+
+        if (eq1_val != eq2_val) {
+            self.program_counter = to;
+        }
+    }
+
+    inline fn iadd(self: *VM, add1: Value, add2: Value, target: RegisterIdent) void {
+        var add1_val: usize = undefined;
+        var add2_val: usize = undefined;
+        switch (add1) {
+            .size => {
+                add1_val = add1.size;
+            },
+            .registerident => {
+                add1_val = self.registers[@intFromEnum(add1.registerident)].value.size;
+            },
+            else => {},
+        }
+
+        switch (add2) {
+            .size => {
+                add2_val = add2.size;
+            },
+            .registerident => {
+                add2_val = self.registers[@intFromEnum(add2.registerident)].value.size;
+            },
+            else => {},
+        }
+
+        self.istr(target, .{ .size = add1_val + add2_val });
+    }
+
     /// instruction: the given instruction to append
     /// this **INLINE** function reallocs the instruction_vector each vm_alloc_size - 1
     pub inline fn appendInstruction(self: *VM, instruction: Instruction) !void {
@@ -165,27 +289,46 @@ pub const VM = struct {
     }
 
     pub inline fn compute(self: *VM) !void {
-        for (0..self.instruction_vector_size) |is| {
-            switch (self.instruction_vector[is].instruction) {
+        while (self.program_counter != self.instruction_vector_size) {
+            switch (self.instruction_vector[self.program_counter].instruction) {
                 .iputs => {
-                    try self.iputs(self.instruction_vector[is].values[0].registerident);
+                    try self.iputs(self.instruction_vector[self.program_counter].values[0].registerident);
                 },
                 .ieputs => {
-                    try self.ieputs(self.instruction_vector[is].values[0].registerident);
+                    try self.ieputs(self.instruction_vector[self.program_counter].values[0].registerident);
                 },
                 .igets => {
-                    try self.igets(self.instruction_vector[is].values[0].registerident);
+                    try self.igets(self.instruction_vector[self.program_counter].values[0].registerident);
                 },
                 .istr => {
-                    self.istr(self.instruction_vector[is].values[0].registerident, self.instruction_vector[is].values[1]);
+                    self.istr(self.instruction_vector[self.program_counter].values[0].registerident, self.instruction_vector[self.program_counter].values[1]);
                 },
                 .izero => {
-                    self.izero(self.instruction_vector[is].values[0].registerident);
+                    self.izero(self.instruction_vector[self.program_counter].values[0].registerident);
+                },
+                .ilbl => {
+                    try self.ilbl(self.instruction_vector[self.program_counter].values[0]);
+                },
+                .ijlbl => {
+                    try self.ijlbl(self.instruction_vector[self.program_counter].values[0]);
+                },
+                .ijmp => {
+                    self.ijmp(self.instruction_vector[self.program_counter].values[0].size);
+                },
+                .ijeq => {
+                    self.ijeq(self.instruction_vector[self.program_counter].values[0].size, self.instruction_vector[self.program_counter].values[1], self.instruction_vector[self.program_counter].values[2]);
+                },
+                .ijne => {
+                    self.ijne(self.instruction_vector[self.program_counter].values[0].size, self.instruction_vector[self.program_counter].values[1], self.instruction_vector[self.program_counter].values[2]);
+                },
+                .iadd => {
+                    self.iadd(self.instruction_vector[self.program_counter].values[0], self.instruction_vector[self.program_counter].values[1], self.instruction_vector[self.program_counter].values[2].registerident);
                 },
                 else => {
                     std.debug.print("Unimplemented", .{});
                 },
             }
+            self.program_counter += 1;
         }
     }
 
@@ -238,4 +381,13 @@ test "vm_strzero" {
         },
         else => {},
     }
+}
+
+test "vm_loop" {
+    var v: VM = try vmCreate(std.heap.page_allocator);
+    defer v.destroy();
+    try v.appendInstruction(.{ .instruction = .istr, .values = [_]Value{ .{ .registerident = .r1 }, .{ .size = 0 }, undefined } });
+    try v.appendInstruction(.{ .instruction = .iadd, .values = [_]Value{ .{ .size = 1 }, .{ .registerident = .r1 }, .{ .registerident = .r1 } } });
+    try v.appendInstruction(.{ .instruction = .ijne, .values = [_]Value{ .{ .size = 0x2 }, .{ .registerident = .r1 }, .{ .size = 10 } } });
+    try v.compute();
 }
